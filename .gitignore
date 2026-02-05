@@ -1,0 +1,7 @@
+data/
+browser_profile/
+config.json
+__pycache__/
+.venv/
+*.pyc
+*.egg-info/
