@@ -126,7 +126,7 @@ class KindleParentDashboard:
             if "/ap/signin" in page.url or "/ap/challenge" in page.url:
                 print("Sign-in required...")
                 self._do_login(page)
-                page.wait_for_load_state("networkidle")
+                page.wait_for_load_state("load")
 
             print(f"Landed on: {page.url}")
             print(f"Page title: {page.title()}")
