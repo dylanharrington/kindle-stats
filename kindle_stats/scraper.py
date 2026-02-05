@@ -85,10 +85,8 @@ class KindleParentDashboard:
                 otp_input.type(otp, delay=20)
                 page.wait_for_timeout(500)
                 page.locator('#auth-signin-button').click()
-                page.wait_for_load_state("networkidle")
-                print(f"  After OTP: {page.url}")
 
-        # If still on a sign-in/challenge page, wait for manual completion
+        # Wait for dashboard regardless of which step we're at
         if "/ap/" in page.url:
             self._wait_for_dashboard(page)
 
