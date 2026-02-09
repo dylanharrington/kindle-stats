@@ -29,7 +29,7 @@ The script will then:
 1. Open a browser window
 2. Log in to Amazon using credentials from 1Password
 3. Handle OTP automatically if configured
-4. Fetch weekly reading activity going back ~3 months (Amazon's retention limit)
+4. Fetch weekly reading activity from your latest saved day forward (inclusive), or auto-bootstrap the last ~120 days on first run
 5. Save results to `data/`
 
 ### Options
@@ -45,7 +45,7 @@ The script will then:
 | `data/reading_data.json` | Canonical merged file — deduplicated by date, accumulates across runs |
 | `data/fetch_<timestamp>.json` | Raw snapshot of each fetch including full API responses (never overwritten) |
 
-Run it periodically (e.g. monthly) to accumulate history before Amazon drops older data.
+Run it periodically (e.g. daily/weekly). Each run re-fetches your latest saved day and onward to capture any mid-day sync updates.
 
 ## Data format
 
@@ -77,5 +77,5 @@ Run it periodically (e.g. monthly) to accumulate history before Amazon drops old
 
 1. **Login** — Playwright opens a Chromium browser, fills email/password/OTP from 1Password CLI
 2. **Intercept** — Captures the dashboard's `get-household` API response to discover child IDs and the CSRF token from cookies
-3. **Fetch** — Calls `get-weekly-activities-v2` for each week from Jan 2025 to now (Amazon only retains ~3 months)
+3. **Fetch** — Calls `get-weekly-activities-v2` for each week from your latest local day, or from an automatic ~120-day bootstrap window on first run
 4. **Merge** — New data is deduplicated by date and merged into the canonical `reading_data.json`
