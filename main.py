@@ -7,6 +7,7 @@ from kindle_stats.config import get_config
 from kindle_stats.scraper import KindleParentDashboard
 
 MERGED_FILE = Path("data/reading_data.json")
+DATE_FORMAT = "%Y-%m-%d"
 
 
 def load_existing():
@@ -29,6 +30,22 @@ def merge_activity(existing, new_entries):
     return sorted(by_date.values(), key=lambda x: x["date"])
 
 
+def latest_existing_date(reading_activity):
+    """Return the latest valid date in reading_activity, or None if unavailable."""
+    latest = None
+    for entry in reading_activity:
+        date_str = entry.get("date")
+        if not date_str:
+            continue
+        try:
+            entry_date = datetime.strptime(date_str, DATE_FORMAT).date()
+        except ValueError:
+            continue
+        if latest is None or entry_date > latest:
+            latest = entry_date
+    return latest.strftime(DATE_FORMAT) if latest else None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Kindle Kids Reading Data Scraper")
     parser.add_argument(
@@ -42,7 +59,19 @@ def main():
         op_vault=config["op_vault"],
         op_item=config["op_item"],
     )
-    data = dashboard.fetch_reading_data(debug=args.debug)
+    existing = load_existing()
+    old_activity = existing.get("reading_activity", [])
+    start_date = latest_existing_date(old_activity)
+
+    if start_date:
+        print(f"  Incremental fetch starting from existing latest day: {start_date}")
+    else:
+        print("  No existing reading history found; using automatic bootstrap window")
+
+    data = dashboard.fetch_reading_data(
+        debug=args.debug,
+        start_date=start_date,
+    )
 
     new_activity = data.get("reading_activity", [])
     print(f"  Fetched {len(new_activity)} days of activity")
@@ -55,8 +84,6 @@ def main():
     print(f"  Raw fetch saved to {raw_path}")
 
     # Merge into the single canonical file
-    existing = load_existing()
-    old_activity = existing.get("reading_activity", [])
     merged = merge_activity(old_activity, new_activity)
 
     existing["reading_activity"] = merged
@@ -66,7 +93,10 @@ def main():
 
     new_days = len(merged) - len(old_activity)
     print(f"\n  Merged: {len(merged)} total days ({'+' + str(new_days) if new_days > 0 else new_days} new)")
-    print(f"  Date range: {merged[0]['date']} to {merged[-1]['date']}")
+    if merged:
+        print(f"  Date range: {merged[0]['date']} to {merged[-1]['date']}")
+    else:
+        print("  Date range: no activity yet")
     print(f"  Saved to {MERGED_FILE}")
 
 

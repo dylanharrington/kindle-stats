@@ -1,7 +1,7 @@
 import json
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -10,6 +10,9 @@ from playwright.sync_api import sync_playwright
 DASHBOARD_URL = "https://www.amazon.com/parentdashboard/activities/household-summary"
 ACTIVITIES_API = "https://www.amazon.com/parentdashboard/ajax/get-weekly-activities-v2"
 AJAX_PREFIX = "/parentdashboard/ajax/"
+BOOTSTRAP_LOOKBACK_DAYS = 120
+TIME_ZONE = "America/Los_Angeles"
+DATE_FORMAT = "%Y-%m-%d"
 
 
 class KindleParentDashboard:
@@ -90,9 +93,19 @@ class KindleParentDashboard:
         if "/ap/" in page.url:
             self._wait_for_dashboard(page)
 
-    def fetch_reading_data(self, debug=False):
+    def fetch_reading_data(self, debug=False, start_date=None):
         """Logs in, navigates to dashboard, then calls the activities API
-        for every week from January 2025 to now."""
+        for every week from the provided start_date (inclusive) to now."""
+        tz = ZoneInfo(TIME_ZONE)
+        fetch_start, mode = self._resolve_start_date(start_date, tz)
+        if mode == "incremental":
+            print(f"Fetch window starts at: {fetch_start.strftime(DATE_FORMAT)} (inclusive)")
+        else:
+            print(
+                f"Fetch window starts at: {fetch_start.strftime(DATE_FORMAT)} (auto bootstrap: "
+                f"last {BOOTSTRAP_LOOKBACK_DAYS} days)"
+            )
+
         # We intercept the initial page load to discover the childDirectedId
         initial_responses = []
 
@@ -172,7 +185,7 @@ class KindleParentDashboard:
                 for child_id, child_name in children.items():
                     print(f"\nFetching history for {child_name} ({child_id})...")
                     responses = self._fetch_all_weeks(
-                        page, child_id, csrf_token, debug
+                        page, child_id, csrf_token, fetch_start, debug
                     )
                     all_api_responses.extend(responses)
             elif not csrf_token:
@@ -184,6 +197,24 @@ class KindleParentDashboard:
             browser.close()
 
         return self._extract_reading_info(all_api_responses)
+
+    @staticmethod
+    def _resolve_start_date(start_date, tz):
+        """Parse a start date string, falling back to an automatic bootstrap window."""
+        fallback_start = datetime.now(tz).date() - timedelta(days=BOOTSTRAP_LOOKBACK_DAYS)
+        if not start_date:
+            return fallback_start, "bootstrap"
+
+        try:
+            parsed = datetime.strptime(start_date, DATE_FORMAT).date()
+        except ValueError:
+            print(
+                f"WARNING: Invalid start_date '{start_date}', using automatic bootstrap start "
+                f"{fallback_start.strftime(DATE_FORMAT)}"
+            )
+            return fallback_start, "bootstrap"
+
+        return parsed, "incremental"
 
     def _find_child_ids(self, responses):
         """Extract child directedIds from the get-household API response."""
@@ -197,12 +228,15 @@ class KindleParentDashboard:
                     child_ids[member["directedId"]] = member.get("firstName", "Unknown")
         return child_ids
 
-    def _fetch_all_weeks(self, page, child_id, csrf_token, debug=False):
-        """Call the activities API for every week from Jan 2025 to now."""
-        tz = ZoneInfo("America/Los_Angeles")
-        # Start from January 1, 2025
-        start = datetime(2025, 1, 1, tzinfo=tz)
+    def _fetch_all_weeks(self, page, child_id, csrf_token, start_date, debug=False):
+        """Call the activities API for every week from start_date to now."""
+        tz = ZoneInfo(TIME_ZONE)
+        start = datetime.combine(start_date, datetime.min.time(), tzinfo=tz)
         now = datetime.now(tz)
+
+        if start >= now:
+            print(f"  No fetch needed for {child_id}: start date is in the future")
+            return []
 
         responses = []
         week_seconds = 7 * 86400
@@ -217,7 +251,7 @@ class KindleParentDashboard:
             week_num += 1
 
             result = page.evaluate("""
-                async ([url, childId, startTime, endTime, csrfToken]) => {
+                async ([url, childId, startTime, endTime, csrfToken, timeZone]) => {
                     try {
                         const resp = await fetch(url, {
                             method: 'POST',
@@ -231,7 +265,7 @@ class KindleParentDashboard:
                                 startTime: startTime,
                                 endTime: endTime,
                                 aggregationInterval: 86400,
-                                timeZone: 'America/Los_Angeles',
+                                timeZone: timeZone,
                             }),
                         });
                         const text = await resp.text();
@@ -246,7 +280,7 @@ class KindleParentDashboard:
                         return { status: 0, body: { _error: e.message } };
                     }
                 }
-            """, [ACTIVITIES_API, child_id, current_start, current_end, csrf_token])
+            """, [ACTIVITIES_API, child_id, current_start, current_end, csrf_token, TIME_ZONE])
 
             status = result["status"]
             body = result["body"]
@@ -279,7 +313,7 @@ class KindleParentDashboard:
 
     def _extract_reading_info(self, responses):
         """Parses the activityV2Data structure from API responses."""
-        tz = ZoneInfo("America/Los_Angeles")
+        tz = ZoneInfo(TIME_ZONE)
         reading_activity = []
 
         for resp in responses:
