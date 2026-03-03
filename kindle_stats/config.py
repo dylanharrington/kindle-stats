@@ -19,11 +19,18 @@ def get_config():
     config = load_config()
     changed = False
 
-    if "op_vault" not in config:
-        config["op_vault"] = input("1Password vault name: ").strip()
+    if "bw_item" not in config:
+        config["bw_item"] = input("Bitwarden item name for Amazon [Amazon]: ").strip() or "Amazon"
         changed = True
 
-    if "op_item" not in config:
+    # 1Password settings (optional fallback)
+    if "op_vault" not in config:
+        val = input("1Password vault name (optional fallback, Enter to skip): ").strip()
+        if val:
+            config["op_vault"] = val
+            changed = True
+
+    if "op_vault" in config and "op_item" not in config:
         config["op_item"] = input("1Password item name for Amazon: ").strip()
         changed = True
 

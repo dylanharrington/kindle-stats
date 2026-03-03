@@ -56,8 +56,9 @@ def main():
     args = parser.parse_args()
     config = get_config()
     dashboard = KindleParentDashboard(
-        op_vault=config["op_vault"],
-        op_item=config["op_item"],
+        bw_item=config.get("bw_item", "Amazon"),
+        op_vault=config.get("op_vault"),
+        op_item=config.get("op_item"),
     )
     existing = load_existing()
     old_activity = existing.get("reading_activity", [])
