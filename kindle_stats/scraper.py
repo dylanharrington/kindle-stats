@@ -16,20 +16,57 @@ DATE_FORMAT = "%Y-%m-%d"
 
 
 class KindleParentDashboard:
-    def __init__(self, op_vault, op_item):
+    def __init__(self, bw_item, op_vault=None, op_item=None):
+        self.bw_item = bw_item
         self.op_vault = op_vault
         self.op_item = op_item
 
     @staticmethod
-    def _op_read(ref):
-        """Read a value using a 1Password secret reference."""
+    def _bw_get_field(item_name, field):
+        """Read a credential field using Bitwarden CLI.
+
+        field should be a jq expression like '.login.username' or '.login.password'.
+        Requires BW_SESSION env var to be set.
+        """
         result = subprocess.run(
-            ["op", "read", ref],
+            ["bw", "get", "item", item_name, "--format", "json"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return None
+        jq_result = subprocess.run(
+            ["jq", "-r", field],
+            input=result.stdout, capture_output=True, text=True,
+        )
+        if jq_result.returncode != 0:
+            return None
+        value = jq_result.stdout.strip()
+        return value if value and value != "null" else None
+
+    @staticmethod
+    def _op_read(ref):
+        """Read a value using a 1Password secret reference (fallback)."""
+        script_path = Path(__file__).parent.parent / "op_read_auto.sh"
+        result = subprocess.run(
+            [str(script_path), ref],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
             raise RuntimeError(f"op read failed for '{ref}': {result.stderr.strip()}")
         return result.stdout.strip()
+
+    def _get_credential(self, field_name):
+        """Get a credential, trying Bitwarden first then falling back to 1Password."""
+        bw_fields = {"username": ".login.username", "password": ".login.password"}
+        bw_field = bw_fields.get(field_name)
+        if bw_field:
+            value = self._bw_get_field(self.bw_item, bw_field)
+            if value:
+                return value
+            print(f"  Bitwarden lookup failed for {field_name}, falling back to 1Password...")
+        if self.op_vault and self.op_item:
+            return self._op_read(f"op://{self.op_vault}/{self.op_item}/{field_name}")
+        raise RuntimeError(f"Could not retrieve '{field_name}' from Bitwarden or 1Password")
 
     def _wait_for_dashboard(self, page, timeout_seconds=120):
         """Wait for the page to navigate away from sign-in to the dashboard."""
@@ -45,10 +82,10 @@ class KindleParentDashboard:
         raise TimeoutError("Login did not complete within timeout.")
 
     def _do_login(self, page):
-        """Handle Amazon sign-in using 1Password credentials."""
-        print(f"Fetching credentials from 1Password item '{self.op_item}'...")
-        email = self._op_read(f"op://{self.op_vault}/{self.op_item}/username")
-        password = self._op_read(f"op://{self.op_vault}/{self.op_item}/password")
+        """Handle Amazon sign-in using Bitwarden (with 1Password fallback)."""
+        print(f"Fetching credentials for '{self.bw_item}'...")
+        email = self._get_credential("username")
+        password = self._get_credential("password")
 
         Path("data").mkdir(exist_ok=True)
 
@@ -77,13 +114,25 @@ class KindleParentDashboard:
         # Attempt OTP if Amazon asks for it
         otp_input = page.locator('#auth-mfa-otpcode')
         if otp_input.is_visible(timeout=5000):
-            result = subprocess.run(
-                ["op", "item", "get", self.op_item, "--otp"],
+            otp = None
+            # Try Bitwarden TOTP first
+            bw_result = subprocess.run(
+                ["bw", "get", "totp", self.bw_item],
                 capture_output=True, text=True,
             )
-            otp = result.stdout.strip() if result.returncode == 0 else None
+            if bw_result.returncode == 0 and bw_result.stdout.strip():
+                otp = bw_result.stdout.strip()
+                print("  Filling OTP from Bitwarden...")
+            else:
+                # Fall back to 1Password
+                op_result = subprocess.run(
+                    ["op", "item", "get", self.op_item or self.bw_item, "--otp"],
+                    capture_output=True, text=True,
+                )
+                if op_result.returncode == 0 and op_result.stdout.strip():
+                    otp = op_result.stdout.strip()
+                    print("  Filling OTP from 1Password...")
             if otp:
-                print("  Filling OTP from 1Password...")
                 otp_input.click()
                 otp_input.type(otp, delay=20)
                 page.wait_for_timeout(500)
