@@ -30,7 +30,7 @@ class KindleParentDashboard:
         Requires BW_SESSION env var to be set.
         """
         result = subprocess.run(
-            ["bw", "get", "item", item_name, "--format", "json"],
+            ["bw", "get", "item", item_name],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
