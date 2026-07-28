@@ -46,14 +46,47 @@ def latest_existing_date(reading_activity):
     return latest.strftime(DATE_FORMAT) if latest else None
 
 
-def main():
+def resolve_start_date(requested_start_date, reading_activity):
+    """Use an explicit backfill date when provided, otherwise continue incrementally."""
+    return requested_start_date or latest_existing_date(reading_activity)
+
+
+def parse_start_date(value):
+    """Validate and normalize an argparse start-date value."""
+    try:
+        parsed = datetime.strptime(value, DATE_FORMAT).date()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"must be a valid date in {DATE_FORMAT} format"
+        ) from exc
+
+    canonical = parsed.strftime(DATE_FORMAT)
+    if value != canonical:
+        raise argparse.ArgumentTypeError(
+            f"must use canonical {DATE_FORMAT} format"
+        )
+    if parsed > datetime.now().date():
+        raise argparse.ArgumentTypeError("must not be in the future")
+    return canonical
+
+
+def build_parser():
+    """Build the command-line parser."""
     parser = argparse.ArgumentParser(description="Kindle Kids Reading Data Scraper")
     parser.add_argument(
         "--debug", action="store_true",
         help="Save screenshots and log all captured API responses",
     )
+    parser.add_argument(
+        "--start-date",
+        type=parse_start_date,
+        help="Force a historical backfill from YYYY-MM-DD instead of the latest saved day",
+    )
+    return parser
 
-    args = parser.parse_args()
+
+def main():
+    args = build_parser().parse_args()
     config = get_config()
     dashboard = KindleParentDashboard(
         bw_item=config.get("bw_item", "Amazon"),
@@ -62,9 +95,11 @@ def main():
     )
     existing = load_existing()
     old_activity = existing.get("reading_activity", [])
-    start_date = latest_existing_date(old_activity)
+    start_date = resolve_start_date(args.start_date, old_activity)
 
-    if start_date:
+    if args.start_date:
+        print(f"  Forced backfill starting from: {start_date}")
+    elif start_date:
         print(f"  Incremental fetch starting from existing latest day: {start_date}")
     else:
         print("  No existing reading history found; using automatic bootstrap window")

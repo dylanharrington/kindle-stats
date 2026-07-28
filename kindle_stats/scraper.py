@@ -3,6 +3,7 @@ import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import sync_playwright
@@ -142,6 +143,57 @@ class KindleParentDashboard:
         if "/ap/" in page.url:
             self._wait_for_dashboard(page)
 
+    @staticmethod
+    def _is_activities_api_url(url):
+        """Return whether url targets the weekly activities endpoint."""
+        if not isinstance(url, str):
+            return False
+        try:
+            parsed = urlsplit(url)
+            expected = urlsplit(ACTIVITIES_API)
+        except ValueError:
+            return False
+        return (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+        ) == (
+            expected.scheme,
+            expected.netloc,
+            expected.path,
+        )
+
+    @classmethod
+    def _capture_initial_response(cls, response):
+        """Build a persisted response record with minimal request metadata."""
+        url = response.url
+        if AJAX_PREFIX not in url:
+            return None
+        content_type = response.headers.get("content-type", "")
+        if "json" not in content_type:
+            return None
+
+        try:
+            body = response.json()
+        except Exception:
+            return None
+
+        record = {
+            "url": url,
+            "status": response.status,
+            "body": body,
+        }
+        if cls._is_activities_api_url(url):
+            try:
+                request_body = response.request.post_data_json
+            except Exception:
+                request_body = None
+            if isinstance(request_body, dict):
+                child_id = request_body.get("childDirectedId")
+                if isinstance(child_id, str) and child_id.strip():
+                    record["request_body"] = {"childDirectedId": child_id}
+        return record
+
     def fetch_reading_data(self, debug=False, start_date=None):
         """Logs in, navigates to dashboard, then calls the activities API
         for every week from the provided start_date (inclusive) to now."""
@@ -159,21 +211,9 @@ class KindleParentDashboard:
         initial_responses = []
 
         def handle_response(response):
-            url = response.url
-            if AJAX_PREFIX not in url:
-                return
-            content_type = response.headers.get("content-type", "")
-            if "json" not in content_type:
-                return
-            try:
-                body = response.json()
-                initial_responses.append({
-                    "url": url,
-                    "status": response.status,
-                    "body": body,
-                })
-            except Exception:
-                pass
+            record = self._capture_initial_response(response)
+            if record is not None:
+                initial_responses.append(record)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
@@ -266,15 +306,34 @@ class KindleParentDashboard:
         return parsed, "incremental"
 
     def _find_child_ids(self, responses):
-        """Extract child directedIds from the get-household API response."""
+        """Extract child directedIds from household or activity API traffic."""
         child_ids = {}
         for resp in responses:
-            body = resp.get("body", {})
-            if "members" not in body:
+            if not isinstance(resp, dict):
                 continue
-            for member in body["members"]:
-                if member.get("role") == "CHILD" and member.get("directedId"):
-                    child_ids[member["directedId"]] = member.get("firstName", "Unknown")
+
+            body = resp.get("body")
+            if isinstance(body, dict):
+                members = body.get("members", [])
+                if isinstance(members, list):
+                    for member in members:
+                        if not isinstance(member, dict):
+                            continue
+                        child_id = member.get("directedId")
+                        if (
+                            member.get("role") == "CHILD"
+                            and isinstance(child_id, str)
+                            and child_id.strip()
+                        ):
+                            child_ids[child_id] = member.get("firstName", "Unknown")
+
+            request_body = resp.get("request_body")
+            if self._is_activities_api_url(resp.get("url")) and isinstance(
+                request_body, dict
+            ):
+                child_id = request_body.get("childDirectedId")
+                if isinstance(child_id, str) and child_id.strip():
+                    child_ids.setdefault(child_id, "Unknown")
         return child_ids
 
     def _fetch_all_weeks(self, page, child_id, csrf_token, start_date, debug=False):
