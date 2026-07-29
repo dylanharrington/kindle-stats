@@ -1,5 +1,7 @@
 import argparse
 import json
+import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +30,58 @@ def merge_activity(existing, new_entries):
         if date not in by_date or len(entry.get("books", [])) >= len(by_date[date].get("books", [])):
             by_date[date] = entry
     return sorted(by_date.values(), key=lambda x: x["date"])
+
+
+def merge_completed_books(existing, new_entries):
+    """Merge explicit completion records monotonically by ASIN, then title."""
+    merged = {}
+    for book in [*existing, *new_entries]:
+        asin = str(book.get("asin") or "").strip().upper()
+        title = str(book.get("title") or "").strip().casefold()
+        identity = f"asin:{asin}" if asin else f"title:{title}"
+        current = merged.get(identity)
+        current_date = current.get("completed_at") if current else None
+        candidate_date = book.get("completed_at")
+        if title and (
+            current is None
+            or (candidate_date and (not current_date or candidate_date < current_date))
+        ):
+            merged[identity] = book
+    return sorted(
+        merged.values(),
+        key=lambda book: (book.get("completed_at") or "", book.get("title") or ""),
+    )
+
+
+def sync_family_site_challenge():
+    """Propagate proven Kindle completions into the family-site challenge overlay."""
+    family_site = Path(
+        os.environ.get(
+            "FAMILY_SITE_REPO",
+            Path.home() / "code/family-site-astro",
+        )
+    )
+    sync_script = family_site / "scripts/sync-daphne-reading-challenge.mjs"
+    if not sync_script.exists():
+        print(f"  Challenge sync skipped: {sync_script} not found")
+        return
+
+    result = subprocess.run(
+        [
+            "node",
+            str(sync_script),
+            "--input",
+            str(MERGED_FILE.resolve()),
+        ],
+        cwd=family_site,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Family-site challenge sync failed: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    print(f"  Challenge sync: {result.stdout.strip()}")
 
 
 def latest_existing_date(reading_activity):
@@ -110,6 +164,7 @@ def main():
     )
 
     new_activity = data.get("reading_activity", [])
+    new_completed_books = data.get("completed_books", [])
     print(f"  Fetched {len(new_activity)} days of activity")
 
     # Save raw fetch to timestamped file (never overwritten)
@@ -123,9 +178,14 @@ def main():
     merged = merge_activity(old_activity, new_activity)
 
     existing["reading_activity"] = merged
+    existing["completed_books"] = merge_completed_books(
+        existing.get("completed_books", []),
+        new_completed_books,
+    )
     existing["last_updated"] = datetime.now().isoformat()
 
     MERGED_FILE.write_text(json.dumps(existing, indent=2))
+    sync_family_site_challenge()
 
     new_days = len(merged) - len(old_activity)
     print(f"\n  Merged: {len(merged)} total days ({'+' + str(new_days) if new_days > 0 else new_days} new)")

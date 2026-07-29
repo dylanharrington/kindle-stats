@@ -419,10 +419,63 @@ class KindleParentDashboard:
 
         return responses
 
+    @staticmethod
+    def _extract_completion_evidence(result, attrs):
+        """Return only explicit completion evidence supplied by Amazon."""
+        sources = (result, attrs)
+
+        for source in sources:
+            for key in (
+                "completed",
+                "isCompleted",
+                "is_complete",
+                "COMPLETED",
+                "IS_COMPLETED",
+                "BOOK_COMPLETED",
+            ):
+                value = source.get(key)
+                if value is True or (isinstance(value, str) and value.lower() == "true"):
+                    return {"type": "explicit_completed", "value": True}
+
+        for source in sources:
+            for key in (
+                "percentComplete",
+                "progressPercent",
+                "percent_complete",
+                "progress_percent",
+                "PERCENT_COMPLETE",
+                "PERCENT_READ",
+                "PROGRESS_PERCENT",
+            ):
+                value = source.get(key)
+                try:
+                    percent = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if percent >= 100:
+                    return {"type": "progress_percent", "value": 100}
+
+        for source in sources:
+            for key in (
+                "completionStatus",
+                "readingStatus",
+                "completion_status",
+                "reading_status",
+                "COMPLETION_STATUS",
+                "READING_STATUS",
+                "STATUS",
+            ):
+                value = source.get(key)
+                if isinstance(value, str) and value.lower() in {"completed", "finished"}:
+                    return {"type": "explicit_status", "value": value.lower()}
+
+        return None
+
     def _extract_reading_info(self, responses):
         """Parses the activityV2Data structure from API responses."""
         tz = ZoneInfo(TIME_ZONE)
         reading_activity = []
+        completed_books = {}
 
         for resp in responses:
             url = resp.get("url", "")
@@ -442,13 +495,29 @@ class KindleParentDashboard:
                     books = []
                     for result in interval.get("aggregatedActivityResults", []):
                         attrs = result.get("attributes", {})
-                        books.append({
+                        book = {
                             "title": attrs.get("TITLE", "Unknown"),
                             "asin": attrs.get("ORIGINAL_KEY"),
                             "duration_seconds": result.get("activityDuration", 0),
                             "sessions": result.get("activityCount", 0),
                             "thumbnail": attrs.get("THUMBNAIL_URL"),
-                        })
+                        }
+                        books.append(book)
+
+                        evidence = self._extract_completion_evidence(result, attrs)
+                        if evidence:
+                            completed_at = datetime.fromtimestamp(
+                                result.get("lastActivityTimeStamp") or start_ts,
+                                tz=tz,
+                            ).strftime("%Y-%m-%d")
+                            identity = book["asin"] or book["title"].casefold()
+                            completed_books[identity] = {
+                                "title": book["title"],
+                                "asin": book["asin"],
+                                "completion_status": "completed",
+                                "completed_at": completed_at,
+                                "evidence": evidence,
+                            }
 
                     reading_activity.append({
                         "date": date_str,
@@ -463,5 +532,9 @@ class KindleParentDashboard:
         return {
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "reading_activity": reading_activity,
+            "completed_books": sorted(
+                completed_books.values(),
+                key=lambda book: (book.get("completed_at") or "", book.get("title") or ""),
+            ),
             "raw_responses": responses,
         }

@@ -69,9 +69,26 @@ Run it periodically (e.g. daily/weekly). Each run re-fetches your latest saved d
         }
       ]
     }
+  ],
+  "completed_books": [
+    {
+      "title": "Book Title",
+      "asin": "B07HPCLJL6",
+      "completion_status": "completed",
+      "completed_at": "2026-07-29",
+      "evidence": {
+        "type": "progress_percent",
+        "value": 100
+      }
+    }
   ]
 }
 ```
+
+`completed_books` contains only explicit Amazon completion signals (`completed`,
+`finished`, or 100% progress). Reading time and session counts never create a
+completion record. After writing the canonical file, `main.py` invokes the
+family-site challenge sync when `~/code/family-site-astro` is available.
 
 ## How it works
 

@@ -209,5 +209,31 @@ class FindChildIdsTests(unittest.TestCase):
         )
 
 
+class CompletionEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.dashboard = KindleParentDashboard.__new__(KindleParentDashboard)
+
+    def test_accepts_only_explicit_finished_signals(self):
+        cases = [
+            ({"isCompleted": True}, {}, {"type": "explicit_completed", "value": True}),
+            ({}, {"PERCENT_READ": 100}, {"type": "progress_percent", "value": 100}),
+            ({}, {"COMPLETION_STATUS": "FINISHED"}, {"type": "explicit_status", "value": "finished"}),
+        ]
+        for result, attrs, expected in cases:
+            with self.subTest(result=result, attrs=attrs):
+                self.assertEqual(
+                    self.dashboard._extract_completion_evidence(result, attrs),
+                    expected,
+                )
+
+    def test_rejects_partial_progress_and_reading_activity_counters(self):
+        self.assertIsNone(
+            self.dashboard._extract_completion_evidence(
+                {"counter": 100, "activityDuration": 99999},
+                {"PERCENT_READ": 99.9},
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
