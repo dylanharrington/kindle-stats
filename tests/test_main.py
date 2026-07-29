@@ -2,7 +2,7 @@ import io
 import unittest
 from contextlib import redirect_stderr
 
-from main import build_parser, resolve_start_date
+from main import build_parser, merge_completed_books, resolve_start_date
 
 
 class StartDateArgumentTests(unittest.TestCase):
@@ -34,6 +34,27 @@ class ResolveStartDateTests(unittest.TestCase):
 
         self.assertIsNone(args.start_date)
         self.assertEqual(resolve_start_date(args.start_date, activity), "2026-07-26")
+
+
+class MergeCompletedBooksTests(unittest.TestCase):
+    def test_merges_completion_records_idempotently_by_asin(self):
+        completed = {
+            "asin": "B000000001",
+            "title": "Finished Book",
+            "completion_status": "completed",
+            "completed_at": "2026-07-29",
+            "evidence": {"type": "progress_percent", "value": 100},
+        }
+
+        first = merge_completed_books([], [completed])
+        later = {
+            **completed,
+            "completed_at": "2026-07-30",
+        }
+        second = merge_completed_books(first, [later])
+
+        self.assertEqual(first, [completed])
+        self.assertEqual(second, first)
 
 
 if __name__ == "__main__":
