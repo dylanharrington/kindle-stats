@@ -115,6 +115,8 @@ Check the next day: `summary.py` shows `Data last synced:` with the new date.
 ## Example workflows
 
 These are the workflows our family uses. Adapt names, times, and destinations to your family.
+For choosing, screening, buying, and adding books to the child's Kindle, follow
+[PLAYBOOK.md](PLAYBOOK.md).
 
 ### Daily sync
 

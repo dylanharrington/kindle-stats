@@ -11,6 +11,9 @@ Dashboard. On a Fire tablet it keeps only book time and skips apps, video, and w
 Setting this up with an AI agent? Give it [AGENTS.md](AGENTS.md). It has a step-by-step setup
 runbook and example workflows.
 
+Want the whole routine, including picking age-appropriate books, buying them, and putting them
+on your child's Kindle? See [PLAYBOOK.md](PLAYBOOK.md).
+
 ## Safety and privacy
 
 - **It runs on your computer.** During a run it talks only to Amazon's websites. No data goes
