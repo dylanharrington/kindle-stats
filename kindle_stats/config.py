@@ -1,7 +1,11 @@
 import json
+import sys
 from pathlib import Path
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_PATH = REPO_ROOT / "config.json"
+DEFAULT_DATA_DIR = REPO_ROOT / "data"
+DEFAULT_TIME_ZONE = "America/Los_Angeles"
 
 
 def load_config():
@@ -15,27 +19,35 @@ def save_config(config):
 
 
 def get_config():
-    """Load config, prompting for missing values on first run."""
+    """Load config, prompting only when no config.json exists yet.
+
+    An existing config.json is used as-is so unattended runs never block on a
+    prompt. Without one, interactive runs ask a few questions and non-interactive
+    runs stop with instructions.
+    """
     config = load_config()
-    changed = False
+    if config:
+        return config
 
-    if "bw_item" not in config:
-        config["bw_item"] = input("Bitwarden item name for Amazon [Amazon]: ").strip() or "Amazon"
-        changed = True
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            f"No config found at {CONFIG_PATH}.\n"
+            "Copy config.example.json to config.json and edit it, "
+            "or run `python main.py` once in a terminal to answer the setup prompts."
+        )
 
-    # 1Password settings (optional fallback)
-    if "op_vault" not in config:
-        val = input("1Password vault name (optional fallback, Enter to skip): ").strip()
-        if val:
-            config["op_vault"] = val
-            changed = True
+    print("First-run setup. Answers are saved to config.json (gitignored).")
+    login = input("How should Amazon credentials be filled? [bitwarden/1password/manual] (bitwarden): ")
+    login = login.strip().lower() or "bitwarden"
 
-    if "op_vault" in config and "op_item" not in config:
+    if login == "manual":
+        config["login"] = "manual"
+    elif login in ("1password", "op"):
+        config["op_vault"] = input("1Password vault name: ").strip()
         config["op_item"] = input("1Password item name for Amazon: ").strip()
-        changed = True
+    else:
+        config["bw_item"] = input("Bitwarden item name for Amazon [Amazon]: ").strip() or "Amazon"
 
-    if changed:
-        save_config(config)
-        print(f"Config saved to {CONFIG_PATH}")
-
+    save_config(config)
+    print(f"Config saved to {CONFIG_PATH}")
     return config

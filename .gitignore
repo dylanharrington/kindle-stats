@@ -3,5 +3,7 @@ browser_profile/
 config.json
 __pycache__/
 .venv/
+venv/
 *.pyc
 *.egg-info/
+.DS_Store

@@ -2,20 +2,22 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from kindle_stats.config import get_config
+from kindle_stats.config import DEFAULT_DATA_DIR, DEFAULT_TIME_ZONE, get_config
 from kindle_stats.scraper import KindleParentDashboard
 
-MERGED_FILE = Path("data/reading_data.json")
+MERGED_FILENAME = "reading_data.json"
 DATE_FORMAT = "%Y-%m-%d"
 
 
-def load_existing():
+def load_existing(merged_file):
     """Load the merged data file if it exists."""
-    if MERGED_FILE.exists():
-        return json.loads(MERGED_FILE.read_text())
+    if merged_file.exists():
+        return json.loads(merged_file.read_text())
     return {"reading_activity": []}
 
 
@@ -53,35 +55,34 @@ def merge_completed_books(existing, new_entries):
     )
 
 
-def sync_family_site_challenge():
-    """Propagate proven Kindle completions into the family-site challenge overlay."""
-    family_site = Path(
-        os.environ.get(
-            "FAMILY_SITE_REPO",
-            Path.home() / "code/family-site",
-        )
-    )
-    sync_script = family_site / "scripts/sync-reading-challenge.mjs"
-    if not sync_script.exists():
-        print(f"  Challenge sync skipped: {sync_script} not found")
-        return
+def build_post_sync_command(post_sync, merged_file):
+    """Expand a post_sync config entry into (argv, cwd), or None when unset."""
+    if not post_sync:
+        return None
+    command = post_sync.get("command")
+    if not isinstance(command, list) or not command or not all(
+        isinstance(part, str) for part in command
+    ):
+        raise ValueError('post_sync.command must be a non-empty list of strings')
+    reading_data = str(Path(merged_file).resolve())
+    argv = [part.replace("{reading_data}", reading_data) for part in command]
+    cwd = post_sync.get("cwd")
+    return argv, (os.path.expanduser(cwd) if cwd else None)
 
-    result = subprocess.run(
-        [
-            "node",
-            str(sync_script),
-            "--input",
-            str(MERGED_FILE.resolve()),
-        ],
-        cwd=family_site,
-        capture_output=True,
-        text=True,
-    )
+
+def run_post_sync(post_sync, merged_file):
+    """Run the optional post_sync hook after reading_data.json is written."""
+    built = build_post_sync_command(post_sync, merged_file)
+    if built is None:
+        return
+    argv, cwd = built
+    env = {**os.environ, "KINDLE_STATS_READING_DATA": str(Path(merged_file).resolve())}
+    result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
-            f"Family-site challenge sync failed: {result.stderr.strip() or result.stdout.strip()}"
+            f"post_sync failed: {result.stderr.strip() or result.stdout.strip()}"
         )
-    print(f"  Challenge sync: {result.stdout.strip()}")
+    print(f"  post_sync: {result.stdout.strip() or 'ok'}")
 
 
 def latest_existing_date(reading_activity):
@@ -136,18 +137,43 @@ def build_parser():
         type=parse_start_date,
         help="Force a historical backfill from YYYY-MM-DD instead of the latest saved day",
     )
+    parser.add_argument(
+        "--child",
+        help="Only fetch this child (first name or Amazon directedId); required with 2+ children",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help=f"Where to keep data files (default: {DEFAULT_DATA_DIR})",
+    )
     return parser
+
+
+def resolve_time_zone(config):
+    """Return the configured IANA time zone, validated."""
+    name = config.get("time_zone") or DEFAULT_TIME_ZONE
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise SystemExit(f"Invalid time_zone in config.json: {name!r}") from exc
+    return name
 
 
 def main():
     args = build_parser().parse_args()
     config = get_config()
+    data_dir = Path(args.data_dir or config.get("data_dir") or DEFAULT_DATA_DIR).expanduser()
+    merged_file = data_dir / MERGED_FILENAME
     dashboard = KindleParentDashboard(
-        bw_item=config.get("bw_item", "Amazon"),
+        bw_item=config.get("bw_item"),
         op_vault=config.get("op_vault"),
         op_item=config.get("op_item"),
+        op_auto_approve=config.get("op_auto_approve") is True,
+        manual_login=config.get("login") == "manual",
+        time_zone=resolve_time_zone(config),
+        data_dir=data_dir,
     )
-    existing = load_existing()
+    existing = load_existing(merged_file)
     old_activity = existing.get("reading_activity", [])
     start_date = resolve_start_date(args.start_date, old_activity)
 
@@ -158,19 +184,25 @@ def main():
     else:
         print("  No existing reading history found; using automatic bootstrap window")
 
-    data = dashboard.fetch_reading_data(
-        debug=args.debug,
-        start_date=start_date,
-    )
+    try:
+        data = dashboard.fetch_reading_data(
+            debug=args.debug,
+            start_date=start_date,
+            child=args.child or config.get("child"),
+        )
+    except (RuntimeError, TimeoutError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     new_activity = data.get("reading_activity", [])
     new_completed_books = data.get("completed_books", [])
     print(f"  Fetched {len(new_activity)} days of activity")
 
     # Save raw fetch to timestamped file (never overwritten)
-    Path("data").mkdir(exist_ok=True)
+    if not data_dir.exists():
+        data_dir.mkdir(mode=0o700, parents=True)
     timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%S")
-    raw_path = Path(f"data/fetch_{timestamp}.json")
+    raw_path = data_dir / f"fetch_{timestamp}.json"
     raw_path.write_text(json.dumps(data, indent=2))
     print(f"  Raw fetch saved to {raw_path}")
 
@@ -184,8 +216,12 @@ def main():
     )
     existing["last_updated"] = datetime.now().isoformat()
 
-    MERGED_FILE.write_text(json.dumps(existing, indent=2))
-    sync_family_site_challenge()
+    merged_file.write_text(json.dumps(existing, indent=2))
+    try:
+        run_post_sync(config.get("post_sync"), merged_file)
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     new_days = len(merged) - len(old_activity)
     print(f"\n  Merged: {len(merged)} total days ({'+' + str(new_days) if new_days > 0 else new_days} new)")
@@ -193,7 +229,7 @@ def main():
         print(f"  Date range: {merged[0]['date']} to {merged[-1]['date']}")
     else:
         print("  Date range: no activity yet")
-    print(f"  Saved to {MERGED_FILE}")
+    print(f"  Saved to {merged_file}")
 
 
 if __name__ == "__main__":
