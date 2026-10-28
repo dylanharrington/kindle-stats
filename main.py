@@ -7,11 +7,24 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from kindle_stats.config import DEFAULT_DATA_DIR, DEFAULT_TIME_ZONE, get_config
+from kindle_stats.config import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_TIME_ZONE,
+    check_login_config,
+    get_config,
+    resolve_data_dir,
+)
 from kindle_stats.scraper import KindleParentDashboard
 
 MERGED_FILENAME = "reading_data.json"
 DATE_FORMAT = "%Y-%m-%d"
+SECRET_ENV_PREFIXES = ("BW_", "OP_")
+
+
+def write_private(path, text):
+    """Write a data file that only the current user can read."""
+    path.write_text(text)
+    path.chmod(0o600)
 
 
 def load_existing(merged_file):
@@ -76,7 +89,12 @@ def run_post_sync(post_sync, merged_file):
     if built is None:
         return
     argv, cwd = built
-    env = {**os.environ, "KINDLE_STATS_READING_DATA": str(Path(merged_file).resolve())}
+    # The hook never needs password manager sessions, so do not pass them on.
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(SECRET_ENV_PREFIXES)
+    }
+    env["KINDLE_STATS_READING_DATA"] = str(Path(merged_file).resolve())
     result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
@@ -130,7 +148,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Kindle Kids Reading Data Scraper")
     parser.add_argument(
         "--debug", action="store_true",
-        help="Save screenshots and log all captured API responses",
+        help="Save screenshots, list captured API calls, and print full child IDs",
     )
     parser.add_argument(
         "--start-date",
@@ -139,7 +157,7 @@ def build_parser():
     )
     parser.add_argument(
         "--child",
-        help="Only fetch this child (first name or Amazon directedId); required with 2+ children",
+        help="Only fetch this child (full child ID from --debug); required with 2+ children",
     )
     parser.add_argument(
         "--data-dir",
@@ -154,7 +172,7 @@ def resolve_time_zone(config):
     name = config.get("time_zone") or DEFAULT_TIME_ZONE
     try:
         ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError) as exc:
+    except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
         raise SystemExit(f"Invalid time_zone in config.json: {name!r}") from exc
     return name
 
@@ -162,7 +180,8 @@ def resolve_time_zone(config):
 def main():
     args = build_parser().parse_args()
     config = get_config()
-    data_dir = Path(args.data_dir or config.get("data_dir") or DEFAULT_DATA_DIR).expanduser()
+    check_login_config(config)
+    data_dir = resolve_data_dir(args.data_dir, config)
     merged_file = data_dir / MERGED_FILENAME
     dashboard = KindleParentDashboard(
         bw_item=config.get("bw_item"),
@@ -203,7 +222,7 @@ def main():
         data_dir.mkdir(mode=0o700, parents=True)
     timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%S")
     raw_path = data_dir / f"fetch_{timestamp}.json"
-    raw_path.write_text(json.dumps(data, indent=2))
+    write_private(raw_path, json.dumps(data, indent=2))
     print(f"  Raw fetch saved to {raw_path}")
 
     # Merge into the single canonical file
@@ -216,7 +235,7 @@ def main():
     )
     existing["last_updated"] = datetime.now().isoformat()
 
-    merged_file.write_text(json.dumps(existing, indent=2))
+    write_private(merged_file, json.dumps(existing, indent=2))
     try:
         run_post_sync(config.get("post_sync"), merged_file)
     except (RuntimeError, ValueError, OSError) as exc:

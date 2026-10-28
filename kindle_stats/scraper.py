@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -18,10 +20,19 @@ BOOK_CATEGORY = "BOOK"
 MANUAL_LOGIN_TIMEOUT_SECONDS = 300
 
 
+def _helper_env():
+    """Environment for password manager CLIs: never wait on a hidden prompt."""
+    return {**os.environ, "BW_NOINTERACTION": "true"}
+
+
 def _run_quiet(args, **kwargs):
     """Run a helper CLI, returning None when it is missing or fails."""
+    if "input" not in kwargs:
+        kwargs["stdin"] = subprocess.DEVNULL
     try:
-        result = subprocess.run(args, capture_output=True, text=True, **kwargs)
+        result = subprocess.run(
+            args, capture_output=True, text=True, env=_helper_env(), **kwargs
+        )
     except FileNotFoundError:
         return None
     if result.returncode != 0:
@@ -82,7 +93,13 @@ class KindleParentDashboard:
         else:
             args = ["op", "read", ref]
         try:
-            result = subprocess.run(args, capture_output=True, text=True)
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env=_helper_env(),
+            )
         except FileNotFoundError as exc:
             raise RuntimeError("1Password CLI (op) is not installed") from exc
         if result.returncode != 0:
@@ -93,12 +110,22 @@ class KindleParentDashboard:
         """Get a credential, trying Bitwarden first then falling back to 1Password."""
         bw_fields = {"username": ".login.username", "password": ".login.password"}
         bw_field = bw_fields.get(field_name)
+        has_op = bool(self.op_vault and self.op_item)
         if bw_field and self.bw_item:
-            value = self._bw_get_field(self.bw_item, bw_field)
-            if value:
-                return value
-            print(f"  Bitwarden lookup failed for {field_name}, falling back to 1Password...")
-        if self.op_vault and self.op_item:
+            missing = [cli for cli in ("bw", "jq") if shutil.which(cli) is None]
+            if missing:
+                print(f"  Bitwarden lookup needs {' and '.join(missing)}, which was not found.")
+            else:
+                value = self._bw_get_field(self.bw_item, bw_field)
+                if value:
+                    return value
+                print(
+                    f"  Bitwarden lookup failed for {field_name}. "
+                    "Is the vault unlocked with BW_SESSION set?"
+                )
+            if has_op:
+                print("  Falling back to 1Password...")
+        if has_op:
             return self._op_read(f"op://{self.op_vault}/{self.op_item}/{field_name}")
         raise RuntimeError(f"Could not retrieve '{field_name}' from Bitwarden or 1Password")
 
@@ -241,30 +268,42 @@ class KindleParentDashboard:
 
         Each child's activity is stored by date without a child label, so one
         data directory must hold exactly one child. With several children, a
-        filter (first name or directedId) is required.
+        filter (directedId, or a first name that matches one child) is required.
         """
+        found = ", ".join(
+            f"{name} ({_short_id(child_id)})" for child_id, name in children.items()
+        ) or "none"
         if child_filter:
             wanted = child_filter.strip().casefold()
-            selected = {
+            by_id = {
                 child_id: name
                 for child_id, name in children.items()
-                if child_id.casefold() == wanted or str(name).casefold() == wanted
+                if child_id.casefold() == wanted
             }
-            if not selected:
-                found = ", ".join(
-                    f"{name} ({_short_id(child_id)})" for child_id, name in children.items()
-                ) or "none"
+            if by_id:
+                return by_id
+            by_name = {
+                child_id: name
+                for child_id, name in children.items()
+                if str(name).casefold() == wanted
+            }
+            if len(by_name) > 1:
+                raise RuntimeError(
+                    f"'{child_filter}' matches {len(by_name)} children ({found}). "
+                    "Use the full child ID instead. Run with --debug to print full child IDs."
+                )
+            if not by_name:
                 raise RuntimeError(
                     f"No child matched '{child_filter}'. Children found: {found}. "
                     "Run with --debug to print full child IDs."
                 )
-            return selected
+            return by_name
 
         if len(children) > 1:
-            names = ", ".join(str(name) for name in children.values())
             raise RuntimeError(
-                f"Found {len(children)} children ({names}). Their reading would be mixed "
-                "together. Run once per child with --child NAME --data-dir data/NAME."
+                f"Found {len(children)} children ({found}). Their reading would be mixed "
+                "together. Run once per child with --child CHILD_ID --data-dir data/NAME. "
+                "Run with --debug to print full child IDs."
             )
         return dict(children)
 
@@ -586,6 +625,7 @@ class KindleParentDashboard:
         reading_activity = []
         completed_books = {}
         skipped_categories = set()
+        saw_books = False
 
         for resp in responses:
             url = resp.get("url", "")
@@ -600,6 +640,7 @@ class KindleParentDashboard:
                 if category is not None and category != BOOK_CATEGORY:
                     skipped_categories.add(str(category))
                     continue
+                saw_books = True
                 for interval in category_data.get("intervals", []):
                     start_ts = interval.get("startTime")
                     duration_secs = interval.get("aggregatedDuration", 0)
@@ -643,6 +684,12 @@ class KindleParentDashboard:
 
         if skipped_categories:
             print(f"  Skipped non-book activity: {', '.join(sorted(skipped_categories))}")
+            if not saw_books:
+                print(
+                    f"WARNING: Amazon sent no '{BOOK_CATEGORY}' activity, only "
+                    f"{', '.join(sorted(skipped_categories))}. If your child reads on this "
+                    "device, the category name may have changed. Please report it."
+                )
 
         # Sort by date
         reading_activity.sort(key=lambda x: x["date"])

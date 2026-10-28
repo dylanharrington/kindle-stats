@@ -46,7 +46,7 @@ Ask the parent which password manager holds their Amazon login.
 
 | Choice | Check before you continue |
 |--------|---------------------------|
-| Bitwarden | `bw status` shows `"status":"unlocked"`, and `BW_SESSION` is set in the environment the job will use |
+| Bitwarden | `jq --version` works, `bw status` shows `"status":"unlocked"`, and `BW_SESSION` is set in the environment the job will use |
 | 1Password | `op whoami` succeeds |
 | Manual | A parent is at the computer to sign in during each run |
 
@@ -61,8 +61,11 @@ Start from `config.example.json`. Use only the keys you need:
 { "bw_item": "Amazon", "time_zone": "America/Los_Angeles" }
 ```
 
+Do not add `child` yet. Step 5 tells you when you need it.
+
 Check: `.venv/bin/python -c "import json; print(json.load(open('config.json')))"` prints the
-config.
+config. This proves only that the file is valid JSON. `main.py` also stops before the browser
+opens if the config has no sign-in method.
 
 ### 5. First run, with a parent nearby
 
@@ -79,8 +82,17 @@ Check:
 - `.venv/bin/python summary.py` shows recent days and a current book.
 - The book titles look right to the parent.
 
-If the output says `Found 2 children`, copy the right ID from the `Child ID for config:` lines
-into `"child"` in `config.json`. Use a separate `data_dir` for each child. See the README.
+If the output says `Found 2 children`, each child needs its own data folder. Names often show
+as `Unknown`, so ask the parent which ID is which child (the book titles help), then run once
+per child with the full IDs from the `Child ID for config:` lines:
+
+```bash
+.venv/bin/python main.py --child amzn1.account.AAAA... --data-dir data/ava
+.venv/bin/python main.py --child amzn1.account.BBBB... --data-dir data/ben
+```
+
+One `config.json` holds one `child`, so schedule both commands with these flags. Pass the same
+`--data-dir` to `summary.py`.
 
 ### 6. Clean up debug files
 

@@ -11,6 +11,7 @@ from kindle_stats import config as config_module
 from kindle_stats import scraper as scraper_module
 from kindle_stats.scraper import KindleParentDashboard
 from kindle_stats.summary import format_summary, summarize
+import main as main_module
 from main import build_post_sync_command
 
 
@@ -33,6 +34,15 @@ class SelectChildrenTests(unittest.TestCase):
         self.assertEqual(
             KindleParentDashboard._select_children(self.children, "amzn1.account.BBB222"),
             {"amzn1.account.BBB222": "Ben"},
+        )
+
+    def test_name_shared_by_two_children_is_refused(self):
+        unnamed = {"amzn1.account.AAA111": "Unknown", "amzn1.account.BBB222": "Unknown"}
+        with self.assertRaisesRegex(RuntimeError, "matches 2 children"):
+            KindleParentDashboard._select_children(unnamed, "Unknown")
+        self.assertEqual(
+            KindleParentDashboard._select_children(unnamed, "amzn1.account.AAA111"),
+            {"amzn1.account.AAA111": "Unknown"},
         )
 
     def test_unmatched_filter_lists_children_without_full_ids(self):
@@ -109,6 +119,37 @@ class CredentialHelperTests(unittest.TestCase):
             KindleParentDashboard(op_auto_approve=True)._op_read("op://V/I/password")
             self.assertTrue(run.call_args.args[0][0].endswith("op_read_auto.sh"))
 
+    def test_helpers_never_wait_on_terminal_input(self):
+        completed = mock.Mock(returncode=0, stdout="value\n", stderr="")
+        with mock.patch.object(scraper_module.subprocess, "run", return_value=completed) as run:
+            scraper_module._run_quiet(["bw", "get", "totp", "Amazon"])
+            self.assertIs(run.call_args.kwargs["stdin"], scraper_module.subprocess.DEVNULL)
+            self.assertEqual(run.call_args.kwargs["env"]["BW_NOINTERACTION"], "true")
+
+            KindleParentDashboard(op_vault="V", op_item="I")._op_read("op://V/I/password")
+            self.assertIs(run.call_args.kwargs["stdin"], scraper_module.subprocess.DEVNULL)
+
+    def test_missing_jq_is_named_in_the_message(self):
+        dashboard = KindleParentDashboard(bw_item="Amazon")
+        output = io.StringIO()
+        with mock.patch.object(scraper_module.shutil, "which", return_value=None), \
+                redirect_stdout(output):
+            with self.assertRaises(RuntimeError):
+                dashboard._get_credential("username")
+        self.assertIn("bw and jq", output.getvalue())
+
+
+class BookCategoryWarningTests(unittest.TestCase):
+    def test_warns_when_no_book_category_arrives(self):
+        responses = [{
+            "url": scraper_module.ACTIVITIES_API,
+            "body": {"activityV2Data": [{"category": "APP", "intervals": []}]},
+        }]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            KindleParentDashboard()._extract_reading_info(responses)
+        self.assertIn("WARNING", output.getvalue())
+
 
 class FakeLocator:
     def __init__(self, visible):
@@ -181,6 +222,19 @@ class PostSyncTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_post_sync_command({"command": "node sync.mjs"}, "data/reading_data.json")
 
+    def test_hook_does_not_receive_password_manager_sessions(self):
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        secrets = {"BW_SESSION": "s", "OP_SESSION_abc": "s", "HOME": "/home/test"}
+        with mock.patch.dict(main_module.os.environ, secrets, clear=True), \
+                mock.patch.object(main_module.subprocess, "run", return_value=completed) as run, \
+                redirect_stdout(io.StringIO()):
+            main_module.run_post_sync({"command": ["true"]}, "data/reading_data.json")
+        env = run.call_args.kwargs["env"]
+        self.assertNotIn("BW_SESSION", env)
+        self.assertNotIn("OP_SESSION_abc", env)
+        self.assertEqual(env["HOME"], "/home/test")
+        self.assertIn("KINDLE_STATS_READING_DATA", env)
+
 
 class ConfigTests(unittest.TestCase):
     def test_non_interactive_run_without_config_stops_with_instructions(self):
@@ -199,6 +253,38 @@ class ConfigTests(unittest.TestCase):
             with mock.patch.object(config_module, "CONFIG_PATH", path), \
                     mock.patch("builtins.input", side_effect=AssertionError("prompted")):
                 self.assertEqual(config_module.get_config(), {"login": "manual"})
+
+    def test_empty_or_broken_config_gives_a_clear_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            with mock.patch.object(config_module, "CONFIG_PATH", path):
+                path.write_text("{}")
+                self.assertEqual(config_module.get_config(), {})
+                with self.assertRaisesRegex(SystemExit, "No sign-in method"):
+                    config_module.check_login_config({})
+                with self.assertRaisesRegex(SystemExit, "No sign-in method"):
+                    config_module.check_login_config({"op_vault": "", "op_item": ""})
+                path.write_text("{not json")
+                with self.assertRaisesRegex(SystemExit, "not valid JSON"):
+                    config_module.get_config()
+        config_module.check_login_config({"bw_item": "Amazon"})
+        config_module.check_login_config({"login": "manual"})
+
+    def test_setup_prompts_again_on_blank_answers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            answers = iter(["1password", "", "Private", "", "Amazon"])
+            with mock.patch.object(config_module, "CONFIG_PATH", path), \
+                    mock.patch.object(config_module.sys.stdin, "isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=lambda _: next(answers)), \
+                    redirect_stdout(io.StringIO()):
+                config = config_module.get_config()
+        self.assertEqual(config, {"op_vault": "Private", "op_item": "Amazon"})
+
+    def test_relative_data_dir_in_config_is_relative_to_repo(self):
+        resolved = config_module.resolve_data_dir(None, {"data_dir": "data/ava"})
+        self.assertEqual(resolved, config_module.REPO_ROOT / "data" / "ava")
+        self.assertEqual(config_module.resolve_data_dir(None, {}), config_module.DEFAULT_DATA_DIR)
 
     def test_example_config_is_valid_json(self):
         example = Path(config_module.REPO_ROOT) / "config.example.json"

@@ -1,8 +1,10 @@
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from kindle_stats.config import DEFAULT_DATA_DIR, load_config
+from kindle_stats.config import DEFAULT_DATA_DIR, DEFAULT_TIME_ZONE, load_config, resolve_data_dir
 from kindle_stats.summary import format_summary, summarize
 
 
@@ -17,12 +19,18 @@ def main():
     if args.days < 1:
         parser.error("--days must be at least 1")
 
-    data_dir = Path(args.data_dir or load_config().get("data_dir") or DEFAULT_DATA_DIR).expanduser()
+    config = load_config()
+    data_dir = resolve_data_dir(args.data_dir, config)
     merged_file = data_dir / "reading_data.json"
     if not merged_file.exists():
         raise SystemExit(f"No reading data at {merged_file}. Run `python main.py` first.")
 
-    summary = summarize(json.loads(merged_file.read_text()), days=args.days)
+    try:
+        today = datetime.now(ZoneInfo(config.get("time_zone") or DEFAULT_TIME_ZONE)).date()
+    except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+        raise SystemExit(f"Invalid time_zone in config.json: {config.get('time_zone')!r}") from exc
+
+    summary = summarize(json.loads(merged_file.read_text()), days=args.days, today=today)
     print(json.dumps(summary, indent=2) if args.json else format_summary(summary))
 
 

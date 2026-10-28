@@ -13,13 +13,16 @@ runbook and example workflows.
 
 ## Safety and privacy
 
-- **It runs on your computer and talks only to amazon.com.** No data goes anywhere else unless
-  you add a `post_sync` hook yourself.
+- **It runs on your computer.** During a run it talks only to Amazon's websites. No data goes
+  anywhere else unless you add a `post_sync` hook yourself. (Setup downloads packages from PyPI
+  and the Playwright browser.)
 - **Your password is never saved.** Each run reads your Amazon login from Bitwarden or 1Password,
   or you sign in yourself in the browser window. The script does not write credentials to disk
   or print them.
 - **Your data stays in `data/`.** That folder is gitignored. It holds book titles, dates, and
-  minutes, plus raw snapshots that include Amazon account IDs. Do not commit or share it.
+  minutes, plus raw snapshots of Amazon's dashboard responses. Those can include household
+  member and device details. The files are readable only by your user. Do not commit or share
+  them.
 - **`--debug` screenshots can show your email address.** Delete `data/debug_*.png` after you
   finish debugging.
 - **It uses Amazon's private dashboard endpoints.** These are undocumented, so Amazon can change
@@ -64,11 +67,11 @@ questions and saves the answers.
 | Key | Example | What it does |
 |-----|---------|--------------|
 | `bw_item` | `"Amazon"` | Bitwarden item with the Amazon username, password, and optional TOTP |
-| `op_vault`, `op_item` | `"Private"`, `"Amazon"` | 1Password vault and item. Used if Bitwarden is not set or fails |
+| `op_vault`, `op_item` | `"Private"`, `"Amazon"` | 1Password vault and item. Set both. Used if Bitwarden is not set or fails |
 | `login` | `"manual"` | Skip the password manager. You sign in yourself (5-minute limit) |
-| `child` | `"amzn1.account.AB12..."` | Which child to sync. Required if the account has 2 or more children |
+| `child` | `"amzn1.account.AB12..."` | Full child ID to sync. Required if the account has 2 or more children |
 | `time_zone` | `"America/New_York"` | IANA time zone for day boundaries. Default `America/Los_Angeles` |
-| `data_dir` | `"~/kindle-data"` | Where data is saved. Default is `data/` in this repo |
+| `data_dir` | `"~/kindle-data"` | Where data is saved. Default is `data/` in this repo. A relative path is relative to this repo |
 | `post_sync` | see below | Command to run after each successful sync |
 | `op_auto_approve` | `true` | Use `op_read_auto.sh`. Off by default. See the safety note above |
 
@@ -109,7 +112,7 @@ variable. If the command fails, `main.py` exits with an error.
 python main.py                          # sync from the latest saved day to now
 python main.py --debug                  # also save screenshots and print full child IDs
 python main.py --start-date 2026-08-01  # re-fetch from a date (Amazon keeps about 90 days)
-python main.py --child Ava --data-dir data/ava
+python main.py --child amzn1.account.AAAA... --data-dir data/ava
 
 python summary.py                       # last 7 days, current book, all-time totals
 python summary.py --days 30
@@ -137,8 +140,12 @@ manager must also be unlocked. A small wrapper script keeps the schedule simple:
 set -euo pipefail
 . ~/.config/kindle-stats.env   # exports BW_SESSION; chmod 600 this file
 cd ~/code/kindle-stats
+mkdir -p data
 .venv/bin/python main.py >> data/sync.log 2>&1
 ```
+
+A saved `BW_SESSION` unlocks your whole Bitwarden vault, not just the Amazon item. Keep that
+file private (`chmod 600`), and decide on purpose whether you want a stored session at all.
 
 ## More than one child
 
@@ -151,7 +158,8 @@ python main.py --child amzn1.account.BBBB... --data-dir data/ben
 ```
 
 Amazon currently does not send child names on this page, so names often show as `Unknown`.
-Use the full child ID instead. `python main.py --debug` prints it.
+Use the full child ID instead. `python main.py --debug` prints it. If a name matches more than
+one child, `main.py` stops and asks for the ID.
 
 This tool has been tested on an account with one child. The multi-child guard is covered by
 unit tests but has not run against a real multi-child account.
